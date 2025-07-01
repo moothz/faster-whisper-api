@@ -157,12 +157,15 @@ app.post('/transcribe', async (req, res) => {
                     resolve(data);
                 });
             });
-            audioDuration = parseFloat(metadata.format.duration.toFixed(2));
+            audioDuration = Math.ceil(metadata.format.duration);
 
             // Calcula o tempo estimado de transcrição
-            const estimatedTranscriptionTime = (audioDuration / CONVERSION_TIME_RATE) + 1; // Adiciona 1 segundo de buffer
+            const estimatedTranscriptionTime = Math.ceil((audioDuration / CONVERSION_TIME_RATE) + 1); // Adiciona 1 segundo de buffer
 
             // Envia a resposta inicial com a duração e o tempo estimado
+            const dados = { executionId, audioDuration, estimatedTranscriptionTime };
+            logger.info(`[${executionId}] Transcrição inciada: ${JSON.stringify(dados)}`);
+
             res.status(202).json({ executionId, audioDuration, estimatedTranscriptionTime });
 
             // Passo 4: Executar a transcrição
@@ -176,7 +179,7 @@ app.post('/transcribe', async (req, res) => {
                 text: transcribedText,
             };
 
-            logger.info(`[${executionId}] Transcrição concluída.`);
+            logger.info(`[${executionId}] Transcrição concluída: ${JSON.stringify(tasks[executionId], null, '\t')}`);
 
         } catch (error) {
             tasks[executionId] = {
