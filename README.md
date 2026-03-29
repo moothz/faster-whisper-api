@@ -2,7 +2,7 @@
 
 Uma API de transcrição de áudio assíncrona, poderosa e fácil de usar, construída com Node.js e o motor de transcrição de alta performance [Faster Whisper](https://github.com/guillaumekln/faster-whisper).
 
-> **Nota:** Este projeto foi desenvolvido com a ajuda do **Gemini**, um modelo de linguagem da Google.
+Esta é uma solução leve e eficiente projetada para ser utilizada em bots de **Telegram** e **WhatsApp**. Ela é o motor de transcrição primário utilizado no projeto [Ravena AI](https://github.com/moothz/ravena-ai).
 
 ---
 
@@ -22,9 +22,9 @@ Antes de começar, você precisará ter os seguintes softwares instalados em sua
 
 1.  **[node.js](https://nodejs.org/en/)**: Versão 14 ou superior.
 2.  **[FFmpeg](https://ffmpeg.org/download.html)**: Essencial para o processamento de áudio. Certifique-se de que o `ffmpeg` esteja disponível no PATH do seu sistema.
-3.  **Executável do faster-whisper**: É necessário baixar o executável compatível com o seu sistema operacional. Recomenda-se usar um modelo grande como o `XXL` para melhores resultados. Recomendo os binários pré-compilados já com todas as bibliotecas necessárias:
-    -   **[Baixe aqui a versão mais recente](https://github.com/Purfview/whisper-standalone-win/releases/tag/Faster-Whisper-XXL)**
-    -   **[Repositório oficial](https://github.com/SYSTRAN/faster-whisper)**
+3.  **Binários do Faster-Whisper-XXL**: Esta API requer os binários compilados do Faster Whisper. 
+    - **[Baixe aqui a versão mais recente dos binários compilados](https://github.com/Purfview/whisper-standalone-win/releases/tag/Faster-Whisper-XXL)**.
+    - Após baixar, extraia os arquivos em uma pasta de sua preferência e anote o caminho do executável `faster-whisper-xxl` para configurar no seu `.env`.
 
 ---
 
@@ -41,32 +41,67 @@ cd faster-whisper-api
 
 ### 2. Instale as Dependências
 
-Navegue até a pasta do projeto e instale os pacotes Node.js necessários.
-
 ```bash
 npm install
 ```
 
-### 3. Configure as variáveis
+### 3. Configure as Variáveis de Ambiente
 
-Abra o arquivo `server.js` e altere a constante `FASTER_WHISPER_EXECUTABLE` para o caminho **absoluto** onde você salvou o executável do `go-faster-whisper`.
-Também é possível alterar a `CONVERSION_TIME_RATE`, que gera uma estimativa de tempo para a conversão do áudio - você deve testar a capacidade do seu servidor.
+Crie um arquivo `.env` na raiz do projeto copiando o modelo do `.env.example`:
 
-```javascript
-// Exemplo de configuração no server.js
-const FASTER_WHISPER_EXECUTABLE = 'C:/Apps/faster-whisper-xxl.exe';
+```bash
+cp .env.example .env
+```
+
+Abra o arquivo `.env` e ajuste as variáveis de acordo com o seu ambiente, **especialmente o caminho dos binários baixados**:
+
+```env
+PORT=3378
+# Caminho ABSOLUTO para o executável do faster-whisper-xxl
+WHISPER_EXECUTABLE="/caminho/absoluto/para/binarios/faster-whisper-xxl"
+WHISPER_MODEL="large-v3-turbo"
+WHISPER_COMPUTE_TYPE="float16" # use 'int8' se estiver no CPU
+WHISPER_LANGUAGE="pt"
+CONVERSION_TIME_RATE=5
 ```
 
 ### 4. Rode o Servidor
 
-Com tudo configurado, inicie a API.
+#### Modo Desenvolvimento (Direto):
+```bash
+npm start
+```
+
+#### Modo Produção (PM2):
+Para manter a API rodando em segundo plano e reiniciando automaticamente após quedas:
 
 ```bash
-node server.js
+# Instale o PM2 globalmente se não tiver
+npm install pm2 -g
+
+# Inicie a API com um nome amigável
+pm2 start server.js --name faster-whisper-api
+
+# Salve a lista de processos para reiniciar com o sistema
+pm2 save
 ```
 
 O console deverá exibir a mensagem:
 `🎙️ Servidor da API de Transcrição rodando na porta 3378`
+
+---
+
+## ⚙️ Configuração (.env)
+
+| Variável | Descrição | Padrão |
+| :--- | :--- | :--- |
+| `PORT` | Porta em que o servidor Express irá rodar. | `3378` |
+| `WHISPER_EXECUTABLE` | Caminho absoluto para o executável do Faster Whisper. | (Obrigatório) |
+| `WHISPER_MODEL` | Modelo do Whisper a ser utilizado (`tiny`, `base`, `small`, `medium`, `large-v3-turbo`, etc). | `large-v3-turbo` |
+| `WHISPER_COMPUTE_TYPE` | Tipo de computação (`float16` para GPU, `int8` para CPU). | `float16` |
+| `WHISPER_RUN_ON` | Flags adicionais (ex: `--device cpu` para forçar uso de processador). | `""` |
+| `WHISPER_LANGUAGE` | Idioma padrão da transcrição. | `pt` |
+| `CONVERSION_TIME_RATE` | Fator para estimar o tempo de transcrição (segundos de áudio por segundo real). | `5` |
 
 ---
 
@@ -94,13 +129,11 @@ Inicia um novo processo de transcrição. O corpo da requisição deve ser um JS
 
 **Resposta de Sucesso (202 Accepted):**
 
-A API responde imediatamente com um ID da tarefa, a duração do áudio e o tempo previsto para a execução, confirmando que o processo foi recebido.
-
 ```json
 {
   "executionId": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
-  "audioDuration": "182.56",
-  "estimatedTranscriptionTime": "37.512"
+  "audioDuration": 182,
+  "estimatedTranscriptionTime": 37
 }
 ```
 
@@ -108,40 +141,7 @@ A API responde imediatamente com um ID da tarefa, a duração do áudio e o temp
 
 Verifica o status de uma tarefa de transcrição existente.
 
-**Exemplo de Requisição:**
-
 `GET http://localhost:3378/status/a1b2c3d4-e5f6-7890-1234-567890abcdef`
-
-**Respostas Possíveis:**
-
-- **Status `running`:**
-
-  ```json
-  {
-    "status": "running",
-    "startTime": 1678886400000
-  }
-  ```
-
-- **Status `complete`:**
-
-  ```json
-  {
-    "status": "complete",
-    "fileSize": 123456, // em bytes
-    "duration": 15.67, // em segundos
-    "text": "Olá, este é um teste de transcrição de áudio."
-  }
-  ```
-
-- **Status `error`:**
-
-  ```json
-  {
-    "status": "error",
-    "message": "Erro no FFmpeg: ..."
-  }
-  ```
 
 ---
 
@@ -149,16 +149,22 @@ Verifica o status de uma tarefa de transcrição existente.
 
 O projeto inclui um script (`example.js`) que demonstra como interagir com a API.
 
-**Como usar:**
-
-Passe o caminho de um arquivo de áudio local como argumento na linha de comando.
-
 ```bash
 node example.js boanoite.mp3
 ```
 
-O script irá:
-1.  Converter o áudio para base64.
-2.  Enviar para o endpoint `/transcribe`.
-3.  Verificar o status a cada 10 segundos até a conclusão.
-4.  Imprimir o resultado final no console.
+---
+
+## 🤝 Contribuição
+
+Contribuições são bem-vindas! Sinta-se à vontade para abrir uma **Issue** ou enviar um **Pull Request**.
+
+---
+
+## 📄 Licença
+
+Este projeto está licenciado sob a Licença MIT - veja o arquivo [LICENSE](LICENSE) para mais detalhes.
+
+---
+
+> **Desenvolvido com ❤️ por moothz (com uma mãozinha do Gemini).**

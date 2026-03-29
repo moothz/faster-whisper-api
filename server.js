@@ -1,4 +1,5 @@
 // Importação dos módulos necessários
+require('dotenv').config();
 const express = require('express');
 const logger = require('./logger');
 const { exec } = require('child_process');
@@ -18,13 +19,16 @@ app.use((req, res, next) => {
     next();
 });
 
-const runOn = ""; // Mude para "--device cpu" caso a GPU não suporte
-
 // --- CONFIGURAÇÕES ---
-// Caminho para o executável do Faster Whisper XXL
-const FASTER_WHISPER_EXECUTABLE = '"C:/Apps/Faster-Whisper-XXL/faster-whisper-xxl.exe"'; // Substitua pelo caminho correto
-const PORT = 3378;
-const CONVERSION_TIME_RATE = 5; // 5 segundos de áudio = 1 segundo de transcrição. Edite para o do seu servidor (pode ser menor que 1 e maior que 0)
+const PORT = process.env.PORT || 3378;
+const CONVERSION_TIME_RATE = Number(process.env.CONVERSION_TIME_RATE) || 5;
+
+// Configurações do Faster Whisper
+const WHISPER_EXECUTABLE = process.env.WHISPER_EXECUTABLE;
+const WHISPER_MODEL = process.env.WHISPER_MODEL || "large-v3-turbo";
+const WHISPER_COMPUTE_TYPE = process.env.WHISPER_COMPUTE_TYPE || "float16";
+const WHISPER_RUN_ON = process.env.WHISPER_RUN_ON || "";
+const WHISPER_LANGUAGE = process.env.WHISPER_LANGUAGE || "pt";
 
 // Armazenamento em memória para os status das transcrições
 const tasks = {};
@@ -61,11 +65,16 @@ function processAudio(inputPath, outputPath) {
  */
 function runWhisper(audioPath) {
     return new Promise((resolve, reject) => {
-        const command = `${FASTER_WHISPER_EXECUTABLE} "${audioPath}" ${runOn} --language pt --compute_type float16 --output_dir "${TEMP_DIR}" --output_format txt`;
+        // Monta o comando de execução de forma limpa
+        const modelArg = `-m ${WHISPER_MODEL}`;
+        const computeArg = `--compute_type ${WHISPER_COMPUTE_TYPE}`;
+        const languageArg = `--language ${WHISPER_LANGUAGE}`;
+        const outputArg = `--output_dir "${TEMP_DIR}" --output_format txt`;
+        
+        const command = `"${WHISPER_EXECUTABLE}" "${audioPath}" ${WHISPER_RUN_ON} ${modelArg} ${languageArg} ${computeArg} ${outputArg}`;
         const whisperOutputPath = audioPath.replace(/\.[^/.]+$/, '') + '.txt';
 
-        console.log(command);
-        console.log(whisperOutputPath);
+        logger.info(`Executando comando: ${command}`);
 
         exec(command, (error, stdout, stderr) => {
 
