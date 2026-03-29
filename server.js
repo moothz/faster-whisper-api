@@ -8,10 +8,36 @@ const fs = require('fs');
 const path = require('path');
 const fluent_ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
+const swaggerUi = require('swagger-ui-express');
+const swaggerJsdoc = require('swagger-jsdoc');
+
+// Configuração do Swagger
+const swaggerOptions = {
+    definition: {
+        openapi: '3.0.0',
+        info: {
+            title: 'Faster Whisper API',
+            version: '1.0.0',
+            description: 'API de transcrição de áudio assíncrona utilizando Faster Whisper XXL',
+        },
+        servers: [
+            {
+                url: `http://localhost:${process.env.PORT || 3378}`,
+                description: 'Servidor Local',
+            },
+        ],
+    },
+    apis: ['./server.js'], // Caminho para os arquivos com anotações
+};
+
+const swaggerDocs = swaggerJsdoc(swaggerOptions);
 
 // Configuração do aplicativo Express
 const app = express();
 app.use(express.json({ limit: '50mb' })); // Aumenta o limite de tamanho do corpo da requisição para aceitar áudios em base64
+
+// Rota para documentação Swagger
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 
 // Middleware para logar todas as requisições
 app.use((req, res, next) => {
@@ -115,16 +141,40 @@ function cleanupString(text) {
 // --- ENDPOINTS DA API ---
 
 /**
- * POST /transcribe
- * Inicia o processo de transcrição de um arquivo de áudio.
- * Corpo da requisição (JSON):
- * {
- *   "audioData": "string" // Áudio em base64
- * }
- * ou
- * {
- *   "audioUrl": "string" // URL para um arquivo de áudio
- * }
+ * @swagger
+ * /transcribe:
+ *   post:
+ *     summary: Inicia o processo de transcrição de um arquivo de áudio.
+ *     description: Recebe um áudio via base64 ou URL e retorna um ID de execução para consulta posterior.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               audioData:
+ *                 type: string
+ *                 description: Áudio codificado em base64.
+ *               audioUrl:
+ *                 type: string
+ *                 description: URL para um arquivo de áudio.
+ *     responses:
+ *       202:
+ *         description: Transcrição iniciada com sucesso.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 executionId:
+ *                   type: string
+ *                 audioDuration:
+ *                   type: number
+ *                 estimatedTranscriptionTime:
+ *                   type: number
+ *       400:
+ *         description: Requisição inválida (falta audioData ou audioUrl).
  */
 app.post('/transcribe', async (req, res) => {
     const executionId = uuidv4();
@@ -205,8 +255,23 @@ app.post('/transcribe', async (req, res) => {
 });
 
 /**
- * GET /status/:executionId
- * Consulta o status de um processo de transcrição.
+ * @swagger
+ * /status/{executionId}:
+ *   get:
+ *     summary: Consulta o status de um processo de transcrição.
+ *     description: Retorna o status atual (running, complete, error) e o resultado final caso concluído.
+ *     parameters:
+ *       - in: path
+ *         name: executionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID da execução retornado pelo endpoint /transcribe.
+ *     responses:
+ *       200:
+ *         description: Status retornado com sucesso.
+ *       404:
+ *         description: ID de execução não encontrado.
  */
 app.get('/status/:executionId', (req, res) => {
     const { executionId } = req.params;
@@ -222,5 +287,6 @@ app.get('/status/:executionId', (req, res) => {
 // --- INICIALIZAÇÃO DO SERVIDOR ---
 app.listen(PORT, () => {
     logger.info(`🎙️  Servidor da API de Transcrição rodando na porta ${PORT}`);
+    logger.info(`📝 Documentação Swagger disponível em http://localhost:${PORT}/api-docs`);
     logger.info('Aguardando requisições...');
 });

@@ -91,6 +91,14 @@ O console deverá exibir a mensagem:
 
 ---
 
+## 📖 Documentação Interativa (Swagger)
+
+A API conta com uma interface Swagger para facilitar o teste dos endpoints. Com o servidor rodando, acesse:
+
+`http://localhost:3378/api-docs`
+
+---
+
 ## ⚙️ Configuração (.env)
 
 | Variável | Descrição | Padrão |
