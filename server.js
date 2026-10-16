@@ -65,6 +65,57 @@ if (!fs.existsSync(TEMP_DIR)) {
     fs.mkdirSync(TEMP_DIR);
 }
 
+// Rotina periódica de limpeza automática da pasta temp (a cada 10 minutos, remove arquivos com mais de 5 minutos)
+const TEMP_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const TEMP_MAX_AGE_MS = 5 * 60 * 1000;
+
+setInterval(() => {
+    try {
+        const now = Date.now();
+        const files = fs.readdirSync(TEMP_DIR);
+        let removed = 0;
+        for (const file of files) {
+            const filePath = path.join(TEMP_DIR, file);
+            try {
+                const stats = fs.statSync(filePath);
+                if (stats.isFile() && (now - stats.mtimeMs > TEMP_MAX_AGE_MS)) {
+                    fs.unlinkSync(filePath);
+                    removed++;
+                }
+            } catch (err) {
+                // Arquivo pode ter sido removido concorrentemente
+            }
+        }
+        if (removed > 0) {
+            logger.info(`[GarbageCollector] Limpeza automática da pasta temp: ${removed} arquivos removidos.`);
+        }
+    } catch (e) {
+        logger.error(`[GarbageCollector] Erro ao varrer pasta temp: ${e.message}`);
+    }
+}, TEMP_CLEANUP_INTERVAL_MS);
+
+// Rotina de expiração de tarefas em memória (a cada 15 minutos, remove tarefas com mais de 30 minutos)
+const TASKS_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
+const TASKS_MAX_AGE_MS = 30 * 60 * 1000;
+
+setInterval(() => {
+    try {
+        const now = Date.now();
+        let evicted = 0;
+        for (const [id, task] of Object.entries(tasks)) {
+            if (task.startTime && (now - task.startTime > TASKS_MAX_AGE_MS)) {
+                delete tasks[id];
+                evicted++;
+            }
+        }
+        if (evicted > 0) {
+            logger.info(`[GarbageCollector] Expiração de tarefas em memória: ${evicted} tarefas antigas removidas.`);
+        }
+    } catch (e) {
+        logger.error(`[GarbageCollector] Erro na limpeza de tarefas: ${e.message}`);
+    }
+}, TASKS_CLEANUP_INTERVAL_MS);
+
 /**
  * Função para processar o áudio (converter para WAV)
  * @param {string} inputPath - Caminho do arquivo de áudio de entrada (ou URL)
@@ -247,9 +298,17 @@ app.post('/transcribe', async (req, res) => {
             };
             logger.error(`[${executionId}] Erro no processamento:`, error);
         } finally {
-            // Passo 6: Limpar arquivos temporários
-            if (fs.existsSync(tempInputPath)) fs.unlinkSync(tempInputPath);
-            if (fs.existsSync(tempWavPath)) fs.unlinkSync(tempWavPath);
+            // Passo 6: Limpar todos os arquivos temporários gerados (.tmp, .wav, .txt)
+            const whisperOutputPath = tempWavPath.replace(/\.[^/.]+$/, '') + '.txt';
+            [tempInputPath, tempWavPath, whisperOutputPath].forEach((filePath) => {
+                if (filePath && fs.existsSync(filePath)) {
+                    try {
+                        fs.unlinkSync(filePath);
+                    } catch (err) {
+                        logger.warn(`[${executionId}] Falha ao remover temporário ${filePath}: ${err.message}`);
+                    }
+                }
+            });
         }
     })();
 });
