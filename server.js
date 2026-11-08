@@ -2,6 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const logger = require('./logger');
+const selfHeal = require('./selfHeal');
 const { exec } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
@@ -35,6 +36,7 @@ const swaggerDocs = swaggerJsdoc(swaggerOptions);
 // Configuração do aplicativo Express
 const app = express();
 app.use(express.json({ limit: '50mb' })); // Aumenta o limite de tamanho do corpo da requisição para aceitar áudios em base64
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Rota para documentação Swagger
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
@@ -136,11 +138,12 @@ function processAudio(inputPath, outputPath) {
 }
 
 /**
- * Função para executar a transcrição com o Faster Whisper
+ * Função para executar a transcrição com o Faster Whisper (com auto-reparo e retry)
  * @param {string} audioPath - Caminho do arquivo de áudio WAV
+ * @param {boolean} isRetry - Indica se já é uma tentativa após auto-cura
  * @returns {Promise<string>} - O texto transcrito
  */
-function runWhisper(audioPath) {
+function runWhisper(audioPath, isRetry = false) {
     return new Promise((resolve, reject) => {
         // Monta o comando de execução de forma limpa
         const modelArg = `-m ${WHISPER_MODEL}`;
@@ -153,11 +156,27 @@ function runWhisper(audioPath) {
 
         logger.info(`Executando comando: ${command}`);
 
-        exec(command, (error, stdout, stderr) => {
-
+        exec(command, async (error, stdout, stderr) => {
             if (error) {
-                logger.error(`Erro ao executar o Faster Whisper: ${stderr || error.message}`);
-                return reject(new Error(`Erro ao executar o Faster Whisper: ${stderr || error.message}`));
+                const errMsg = stderr || error.message || '';
+                logger.error(`Erro ao executar o Faster Whisper: ${errMsg}`);
+
+                // Autocorreção: se o binário quebrar em tempo de execução, repara e tenta novamente 1 vez
+                if (!isRetry) {
+                    logger.warn(`[SelfHeal] Falha crítica no Whisper. Executando auto-reparo antes de falhar tarefa...`);
+                    const healed = selfHeal.repairWhisperInstallation(WHISPER_EXECUTABLE, __dirname);
+                    if (healed) {
+                        logger.info(`[SelfHeal] Auto-reparo bem-sucedido. Reexecutando transcrição...`);
+                        try {
+                            const retryResult = await runWhisper(audioPath, true);
+                            return resolve(retryResult);
+                        } catch (retryErr) {
+                            return reject(retryErr);
+                        }
+                    }
+                }
+
+                return reject(new Error(`Erro ao executar o Faster Whisper: ${errMsg}`));
             }
 
             let transcribedText = '';
@@ -229,7 +248,7 @@ function cleanupString(text) {
  */
 app.post('/transcribe', async (req, res) => {
     const executionId = uuidv4();
-    const { audioData, audioUrl } = req.body;
+    const { audioData, audioUrl } = req.body || {};
 
     if (!audioData && !audioUrl) {
         return res.status(400).json({ error: 'É necessário fornecer "audioData" (base64) ou "audioUrl".' });
@@ -297,6 +316,9 @@ app.post('/transcribe', async (req, res) => {
                 message: error.message || 'Ocorreu um erro desconhecido.',
             };
             logger.error(`[${executionId}] Erro no processamento:`, error);
+            if (!res.headersSent) {
+                res.status(500).json({ executionId, error: error.message || 'Erro no processamento do áudio.' });
+            }
         } finally {
             // Passo 6: Limpar todos os arquivos temporários gerados (.tmp, .wav, .txt)
             const whisperOutputPath = tempWavPath.replace(/\.[^/.]+$/, '') + '.txt';
@@ -343,7 +365,29 @@ app.get('/status/:executionId', (req, res) => {
     res.json(task);
 });
 
+/**
+ * @swagger
+ * /health:
+ *   get:
+ *     summary: Healthcheck do serviço e validação do binário Faster Whisper.
+ *     responses:
+ *       200:
+ *         description: Serviço e binários saudáveis.
+ *       503:
+ *         description: Falha no healthcheck do binário.
+ */
+app.get('/health', (req, res) => {
+    const health = selfHeal.checkWhisperHealth(WHISPER_EXECUTABLE);
+    if (health.healthy) {
+        return res.status(200).json({ status: 'ok', whisper: 'healthy' });
+    }
+    res.status(503).json({ status: 'degraded', error: health.error });
+});
+
 // --- INICIALIZAÇÃO DO SERVIDOR ---
+// Valida o binário e aplica autocorreção imediata se corrompido ou sem permissões
+selfHeal.ensureHealthy(WHISPER_EXECUTABLE, __dirname);
+
 app.listen(PORT, () => {
     logger.info(`🎙️  Servidor da API de Transcrição rodando na porta ${PORT}`);
     logger.info(`📝 Documentação Swagger disponível em http://localhost:${PORT}/api-docs`);

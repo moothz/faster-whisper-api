@@ -136,3 +136,6 @@ dist
 .pnp.*
 /temp
 /Faster-Whisper-XXL
+
+*.7z
+license.txt
