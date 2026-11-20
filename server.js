@@ -3,12 +3,13 @@ require('dotenv').config();
 const express = require('express');
 const logger = require('./logger');
 const selfHeal = require('./selfHeal');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
 const fluent_ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
+const multer = require('multer');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
 
@@ -57,6 +58,7 @@ const WHISPER_MODEL = process.env.WHISPER_MODEL || "large-v3-turbo";
 const WHISPER_COMPUTE_TYPE = process.env.WHISPER_COMPUTE_TYPE || "float16";
 const WHISPER_RUN_ON = process.env.WHISPER_RUN_ON || "";
 const WHISPER_LANGUAGE = process.env.WHISPER_LANGUAGE || "pt";
+const API_KEY = process.env.API_KEY || "";
 
 // Armazenamento em memória para os status das transcrições
 const tasks = {};
@@ -65,6 +67,40 @@ const tasks = {};
 const TEMP_DIR = path.join(__dirname, 'temp');
 if (!fs.existsSync(TEMP_DIR)) {
     fs.mkdirSync(TEMP_DIR);
+}
+
+// Configuração do Multer para uploads multipart (OpenAI /v1/audio/transcriptions)
+const uploadStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, TEMP_DIR),
+    filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname || '').replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10) || '.audio';
+        cb(null, `openai-${uuidv4()}${ext}`);
+    },
+});
+const uploadAudio = multer({
+    storage: uploadStorage,
+    limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+});
+
+function verifyOptionalAuth(req, res, next) {
+    if (!API_KEY) {
+        return next();
+    }
+    const authHeader = req.headers.authorization || '';
+    const xApiKey = req.headers['x-api-key'] || '';
+    let token = '';
+    if (authHeader.startsWith('Bearer ')) {
+        token = authHeader.slice(7).trim();
+    } else if (xApiKey) {
+        token = String(xApiKey).trim();
+    }
+    if (!token) {
+        return res.status(401).json({ error: { message: 'Missing Authorization Bearer token.', type: 'invalid_request_error' } });
+    }
+    if (token !== API_KEY) {
+        return res.status(403).json({ error: { message: 'Invalid API key.', type: 'invalid_request_error' } });
+    }
+    return next();
 }
 
 // Rotina periódica de limpeza automática da pasta temp (a cada 10 minutos, remove arquivos com mais de 5 minutos)
@@ -208,7 +244,217 @@ function cleanupString(text) {
   return cleanedLines.filter(line => line.length > 2).join('\n');
 }
 
+function normalizeLanguageCode(lang) {
+    if (!lang || typeof lang !== 'string') return null;
+    const cleaned = lang.trim().toLowerCase();
+    if (!cleaned || cleaned === 'auto') return null;
+    // Normaliza formatos como pt-br / pt_BR -> pt (faster-whisper aceita ISO 639-1)
+    const primary = cleaned.split(/[-_]/)[0];
+    if (/^[a-z]{2,3}$/.test(primary)) {
+        return primary;
+    }
+    return null;
+}
+
+/**
+ * Executa o Faster Whisper para o endpoint compatível com OpenAI (usa execFile para segurança e suporta json/srt/vtt)
+ * @param {string} audioPath - Caminho do arquivo WAV
+ * @param {{ language?: string|null, whisperFormat?: string }} options
+ * @param {boolean} isRetry
+ * @returns {Promise<{ text: string, language: string|null, segments: Array, raw: string }>}
+ */
+function runWhisperOpenAI(audioPath, { language = null, whisperFormat = 'json' } = {}, isRetry = false) {
+    return new Promise((resolve, reject) => {
+        const runOnArgs = WHISPER_RUN_ON ? WHISPER_RUN_ON.trim().split(/\s+/).filter(Boolean) : [];
+        const args = [
+            audioPath,
+            ...runOnArgs,
+            '-m', WHISPER_MODEL,
+            '--compute_type', WHISPER_COMPUTE_TYPE,
+            '--output_dir', TEMP_DIR,
+            '--output_format', whisperFormat,
+        ];
+
+        const normalizedLang = normalizeLanguageCode(language);
+        if (normalizedLang) {
+            args.push('--language', normalizedLang);
+        }
+
+        const whisperOutputPath = audioPath.replace(/\.[^/.]+$/, '') + `.${whisperFormat}`;
+        logger.info(`[OpenAI STT] Executando: "${WHISPER_EXECUTABLE}" ${args.join(' ')}`);
+
+        execFile(WHISPER_EXECUTABLE, args, { maxBuffer: 20 * 1024 * 1024 }, async (error, stdout, stderr) => {
+            if (error) {
+                const errMsg = stderr || error.message || '';
+                logger.error(`[OpenAI STT] Erro ao executar Faster Whisper: ${errMsg}`);
+
+                if (!isRetry) {
+                    logger.warn(`[SelfHeal] Falha crítica no Whisper (OpenAI STT). Executando auto-reparo...`);
+                    const healed = selfHeal.repairWhisperInstallation(WHISPER_EXECUTABLE, __dirname);
+                    if (healed) {
+                        logger.info(`[SelfHeal] Auto-reparo bem-sucedido. Reexecutando transcrição...`);
+                        try {
+                            const retryResult = await runWhisperOpenAI(audioPath, { language, whisperFormat }, true);
+                            return resolve(retryResult);
+                        } catch (retryErr) {
+                            return reject(retryErr);
+                        }
+                    }
+                }
+                return reject(new Error(`Erro ao executar o Faster Whisper: ${errMsg}`));
+            }
+
+            try {
+                const raw = fs.readFileSync(whisperOutputPath, 'utf8');
+                if (whisperFormat === 'json') {
+                    const parsed = JSON.parse(raw);
+                    const text = (parsed.text || '').trim();
+                    return resolve({
+                        text,
+                        language: parsed.language || normalizedLang || WHISPER_LANGUAGE,
+                        segments: Array.isArray(parsed.segments) ? parsed.segments : [],
+                        raw,
+                    });
+                }
+                return resolve({
+                    text: raw.trim(),
+                    language: normalizedLang || WHISPER_LANGUAGE,
+                    segments: [],
+                    raw,
+                });
+            } catch (e) {
+                return reject(new Error(`Erro ao ler saída do Whisper (${whisperFormat}): ${e.message}`));
+            }
+        });
+    });
+}
+
 // --- ENDPOINTS DA API ---
+
+/**
+ * OpenAI-compatible GET /v1/models
+ */
+app.get('/v1/models', verifyOptionalAuth, (req, res) => {
+    const now = Math.floor(Date.now() / 1000);
+    res.json({
+        object: 'list',
+        data: [
+            { id: 'whisper-1', object: 'model', created: now, owned_by: 'hyperion-local' },
+            { id: WHISPER_MODEL, object: 'model', created: now, owned_by: 'hyperion-local' },
+        ],
+    });
+});
+
+/**
+ * OpenAI-compatible POST /v1/audio/transcriptions
+ * Aceita multipart/form-data com `file`, `model`, `language` (opcional), `response_format` (json | verbose_json | text | srt | vtt)
+ */
+app.post('/v1/audio/transcriptions', verifyOptionalAuth, (req, res, next) => {
+    uploadAudio.single('file')(req, res, (err) => {
+        if (err) {
+            return res.status(400).json({
+                error: {
+                    message: err.message || 'Erro ao processar arquivo multipart.',
+                    type: 'invalid_request_error',
+                },
+            });
+        }
+        next();
+    });
+}, async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({
+            error: {
+                message: 'O campo "file" (multipart/form-data) é obrigatório.',
+                type: 'invalid_request_error',
+                param: 'file',
+            },
+        });
+    }
+
+    const requestId = uuidv4();
+    const uploadedPath = req.file.path;
+    const tempWavPath = path.join(TEMP_DIR, `openai-${requestId}.wav`);
+    const requestedModel = (req.body && req.body.model) || 'whisper-1';
+    const requestedLanguage = (req.body && req.body.language) || null;
+    const responseFormat = String((req.body && req.body.response_format) || 'json').trim().toLowerCase();
+
+    const supportedFormats = new Set(['json', 'verbose_json', 'text', 'srt', 'vtt']);
+    if (!supportedFormats.has(responseFormat)) {
+        try { if (fs.existsSync(uploadedPath)) fs.unlinkSync(uploadedPath); } catch (_) {}
+        return res.status(400).json({
+            error: {
+                message: `response_format inválido: "${responseFormat}". Use json, verbose_json, text, srt ou vtt.`,
+                type: 'invalid_request_error',
+                param: 'response_format',
+            },
+        });
+    }
+
+    const whisperFormat = (responseFormat === 'srt' || responseFormat === 'vtt') ? responseFormat : 'json';
+    const whisperOutputPath = tempWavPath.replace(/\.[^/.]+$/, '') + `.${whisperFormat}`;
+
+    try {
+        logger.info(`[OpenAI STT ${requestId}] file="${req.file.originalname}" size=${req.file.size} model="${requestedModel}" lang="${requestedLanguage || 'auto'}" fmt="${responseFormat}"`);
+
+        await processAudio(uploadedPath, tempWavPath);
+
+        let audioDuration = 0;
+        try {
+            const metadata = await new Promise((resolve, reject) => {
+                fluent_ffmpeg.ffprobe(tempWavPath, (err, data) => {
+                    if (err) return reject(err);
+                    resolve(data);
+                });
+            });
+            audioDuration = Number(metadata?.format?.duration || 0);
+        } catch (probeErr) {
+            logger.warn(`[OpenAI STT ${requestId}] Falha no ffprobe: ${probeErr.message}`);
+        }
+
+        const result = await runWhisperOpenAI(tempWavPath, {
+            language: requestedLanguage,
+            whisperFormat,
+        });
+
+        logger.info(`[OpenAI STT ${requestId}] Concluído (${audioDuration.toFixed(2)}s, lang=${result.language}): "${result.text.slice(0, 120)}"`);
+
+        if (responseFormat === 'verbose_json') {
+            return res.status(200).json({
+                task: 'transcribe',
+                language: result.language || WHISPER_LANGUAGE,
+                duration: Number(audioDuration.toFixed(2)),
+                text: result.text,
+                segments: result.segments,
+            });
+        }
+        if (responseFormat === 'text') {
+            return res.status(200).type('text/plain; charset=utf-8').send(result.text);
+        }
+        if (responseFormat === 'srt' || responseFormat === 'vtt') {
+            return res.status(200).type('text/plain; charset=utf-8').send(result.raw);
+        }
+        return res.status(200).json({ text: result.text });
+    } catch (error) {
+        logger.error(`[OpenAI STT ${requestId}] Erro na transcrição:`, error);
+        return res.status(500).json({
+            error: {
+                message: error.message || 'Erro ao transcrever o áudio.',
+                type: 'server_error',
+            },
+        });
+    } finally {
+        [uploadedPath, tempWavPath, whisperOutputPath].forEach((filePath) => {
+            if (filePath && fs.existsSync(filePath)) {
+                try {
+                    fs.unlinkSync(filePath);
+                } catch (err) {
+                    logger.warn(`[OpenAI STT ${requestId}] Falha ao remover temporário ${filePath}: ${err.message}`);
+                }
+            }
+        });
+    }
+});
 
 /**
  * @swagger
